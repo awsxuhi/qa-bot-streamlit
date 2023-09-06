@@ -1,0 +1,8 @@
+version: 1.0
+runtime: python3
+build:
+  commands:
+    - pip install pipenv
+    - pipenv install
+run:
+  command: streamlit run webapp.py
