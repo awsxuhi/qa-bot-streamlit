@@ -180,7 +180,7 @@ if user_input:
             sources = [d["metadata"]["s3_key"] for d in response_data["docs"]]
             output = f"{message_content} \n \n Sources: {sources}"
             # 从响应数据中提取文档信息
-            
+
             for document in response_data["docs"]:
                 doc = {"page_content": document["page_content"], "s3_key": document["metadata"]["s3_key"]}
                 new_docs.append(doc)
@@ -210,9 +210,9 @@ with st.expander("Conversation", expanded=True):
                 # st.info(f"S3 Key: {st.session_state['docs'][i][j]['s3_key']}")
                 st.markdown(
                     f"<div style='background-color: Gainsboro; padding: 1px; border-radius: 5px; margin-bottom: 5px;'>"
-                    f"<b>Page Content ({j+1}):</b> {st.session_state['docs'][i][j]['page_content']}"
-                    f"<hr style='margin-bottom: -2px;'>"
                     f"<div style='margin-top: -2px;'><b>S3 Key:</b> {st.session_state['docs'][i][j]['s3_key']}</div>"
+                    f"<hr style='margin-bottom: -2px;'>"
+                    f"<b>Page Content ({j+1}):</b> {st.session_state['docs'][i][j]['page_content']}"
                     "</div>",
                     unsafe_allow_html=True,
                 )
