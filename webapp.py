@@ -8,6 +8,8 @@ and Amazon OpenSearch as the vector database.
 import streamlit as st
 import requests as req
 from typing import List, Tuple, Dict
+import hashlib
+import uuid
 
 # global constants
 STREAMLIT_SESSION_VARS: List[Tuple] = [
@@ -16,16 +18,17 @@ STREAMLIT_SESSION_VARS: List[Tuple] = [
     ("input", ""),
     ("stored_session", []),
     ("docs", []),
+    ("session_id", ""),
 ]
 HTTP_OK: int = 200
 
 # two options for the chatbot, 1) get answer directly from the LLM
 # 2) use RAG (find documents similar to the user query and then provide
 # those as context to the LLM).
-MODE_RAG: str = "RAG"
-MODE_TEXT2TEXT: str = "Text Generation"
+
+# MODE_RAG: str = "RAG"
+# MODE_TEXT2TEXT: str = "Text Generation"
 # MODE_VALUES: List[str] = [MODE_RAG, MODE_TEXT2TEXT]
-MODE_VALUES: List[str] = [MODE_RAG]
 
 TEXT2TEXT_MODEL_LIST: List[str] = [
     "OpenAI(gpt-3.5-turbo)",
@@ -39,36 +42,23 @@ EMBEDDINGS_MODEL_LIST: Dict[str, List[str]] = {
     "CSDC(buffer-instruct-internlm-001)": ["CSDC(buffer-embedding-002)"],
 }
 
-API_RAG_PATH: Dict[str, Dict[str, str]] = {
-    "OpenAI(gpt-3.5-turbo)": {
-        "OpenAI(text-embedding-ada-002)": "qa-openai-opensearch",
-    },
-    "BedRock(titan-tg1-large)": {
-        "BedRock(titan-embeddings)": "qa-csdc-opensearch",
-    },
-    "CSDC(buffer-instruct-internlm-001)": {
-        "CSDC(buffer-embedding-002)": "qa-csdc-opensearch",
-    },
-}
+CHAIN_LIST: List[str] = [
+    "load_qa_chain",
+    "RetrievalQA",
+    "RetrievalQAwithMemory",
+    "ConversationalRetrievalChain",
+]
 
-API_TEXT2TEXT_PATH: Dict[str, Dict[str, str]] = {
-    "OpenAI(gpt-3.5-turbo)": {
-        "OpenAI(text-embedding-ada-002)": "qa-openai-opensearch",
-    },
-    "BedRock(titan-tg1-large)": {
-        "BedRock(titan-embeddings)": "qa-csdc-opensearch",
-    },
-    "CSDC(buffer-instruct-internlm-001)": {
-        "CSDC(buffer-embedding-002)": "qa-csdc-opensearch",
-    },
+EMBEDDING_NAME_LIST: Dict[str, List[str]] = {
+    "OpenAI(text-embedding-ada-002)": "openai",
+    "BedRock(titan-embeddings)": "openai",
+    "CSDC(buffer-embedding-002)": "csdc",
 }
 
 # API endpoint
 # This is the base part of the api endpoint
-api: str = "https://obj90tyol8.execute-api.ap-northeast-1.amazonaws.com/api"
+api: str = "https://q05huaibxg.execute-api.ap-northeast-1.amazonaws.com/api/"
 
-# api_text2text_ep: str = f"{api}/api/v1/llm/text2text"
-# print(f"api_rag_ep={api_rag_ep}\napi_text2text_ep={api_text2text_ep}")
 
 ####################
 # Streamlit code
@@ -81,6 +71,21 @@ st.set_page_config(page_title="Virtual assistant for knowledge base 🤖", layou
 _ = [st.session_state.setdefault(k, v) for k, v in STREAMLIT_SESSION_VARS]
 
 
+# generate session id
+def generate_session_id():
+    if not st.session_state.get("session_id"):
+        st.session_state.session_id = str(uuid.uuid4())
+        print("New session ID generated")  # 添加这行来调试
+    else:
+        print("Existing session ID retrieved")  # 添加这行来调试
+    return st.session_state.session_id
+
+
+current_session_id = generate_session_id()
+# print(f"Current session ID: {current_session_id}")  # 添加这行来调试
+# st.markdown(f"Current session ID: {current_session_id}")
+
+
 # Define function to get user input
 def get_user_input() -> str:
     """
@@ -89,7 +94,7 @@ def get_user_input() -> str:
     print(st.session_state)
     input_text = st.text_input(
         "You: ",
-        st.session_state["input"],
+        st.session_state.get("input", ""),  # 使用get方法来提供一个默认值，xuhi@
         key="input",
         placeholder="Ask me a question and I will consult the knowledge base to answer...",
         label_visibility="hidden",
@@ -100,33 +105,80 @@ def get_user_input() -> str:
 # sidebar with options
 with st.sidebar.expander("⚙️", expanded=True):
     st.title("Configuration")
-    mode = st.selectbox(label="Mode", options=MODE_VALUES)
-    text2text_model = st.selectbox(label="Text2Text Model", options=TEXT2TEXT_MODEL_LIST)
-    embeddings_model = st.selectbox(label="Embeddings Model", options=EMBEDDINGS_MODEL_LIST.get(text2text_model, []))
-    k_value = st.number_input("k", min_value=1, max_value=10, value=3)
-    temperature_value = st.slider("Temperature", min_value=0.0, max_value=1.0, value=0.1, step=0.1)
+    # mode = st.selectbox(label="Mode", options=MODE_VALUES)
+    RAG = st.checkbox("RAG", value=True)
 
-    # if text2text_model == TEXT2TEXT_MODEL_LIST[0]:
-    #     openai_api_key = st.text_input("Please enter your OpenAI API key:", type="password")
-    #     if openai_api_key:
-    #         pass
-    #         # os.environ["OPENAI_API_KEY"] = api_key
+    # 从session_state获取参数的当前值，如果不存在则设置一个默认值
+    text2text_model = st.session_state.get("text2text_model", TEXT2TEXT_MODEL_LIST[0])
+    embeddings_model = st.session_state.get("embeddings_model", EMBEDDINGS_MODEL_LIST.get(text2text_model, [])[0])
+    chat_history_window_value = st.session_state.get("chat_history_window_value", 3)
+    k_value = st.session_state.get("k_value", 3)
+    temperature_value = st.session_state.get("temperature_value", 0.0)
+    chain = st.session_state.get("chain", CHAIN_LIST[0])
+
+    # 创建UI元素，并将用户的选择保存回session_state
+    text2text_model = st.selectbox(
+        label="Text2Text Model", options=TEXT2TEXT_MODEL_LIST, index=TEXT2TEXT_MODEL_LIST.index(text2text_model)
+    )
+    st.session_state.text2text_model = text2text_model
+
+    embeddings_model = st.selectbox(
+        label="Embeddings Model",
+        options=EMBEDDINGS_MODEL_LIST.get(text2text_model, []),
+    )
+    st.session_state.embeddings_model = embeddings_model
+
+    chat_history_window_value = st.number_input(
+        "chat_history_window", min_value=0, max_value=5, value=chat_history_window_value
+    )
+    st.session_state.chat_history_window_value = chat_history_window_value
+
+    k_value = st.number_input("k", min_value=1, max_value=10, value=k_value)
+    st.session_state.k_value = k_value
+
+    temperature_value = st.slider("Temperature", min_value=0.0, max_value=1.0, value=temperature_value, step=0.1)
+    st.session_state.temperature_value = temperature_value
+
+    chain = st.selectbox(label="Chain", options=CHAIN_LIST, index=CHAIN_LIST.index(chain))
+    st.session_state.chain = chain
+
+    if st.button("Refresh KB List"):
+        response = req.get(f"{api}/kb-list")
+        KB_LIST = response.json()
+        st.session_state.KB_LIST = KB_LIST
+    else:
+        KB_LIST = st.session_state.get("KB_LIST", [])
+
+    kb_name = st.selectbox(label="Select KB", options=KB_LIST, index=0)
+    st.session_state.kb_name = kb_name
+
+    if kb_name is None:
+        st.warning("Please select a knowledge base before asking questions.")
+    else:
+        kb_name_hash = hashlib.md5(kb_name.encode()).hexdigest()
+        index_name = f"{kb_name.lower()}_{EMBEDDING_NAME_LIST[embeddings_model]}_{kb_name_hash}"
+
 
 # streamlit app layout sidebar + main panel
 # the main panel has a title, a sub header and user input textbox
 # and a text area for response and history
 st.title("🤖 QaBot for a knowledge base")
-st.subheader(f" Powered by :blue[{text2text_model}] for text generation and :blue[{embeddings_model}] for embeddings")
+st.subheader(
+    f" Session ID: :blue[{current_session_id}] Powered by :blue[{text2text_model}] and :blue[{embeddings_model}]"
+)
 
 # 增加清除历史记录的按钮
 if st.button("Clear Chat History"):
     st.session_state.past = []
     st.session_state.generated = []
     st.session_state.docs = []
+    st.session_state.session_id = str(uuid.uuid4())
     st.experimental_rerun()
+
 
 # get user input
 user_input: str = get_user_input()
+
 
 # based on the selected mode type call the appropriate API endpoint
 if user_input:
@@ -134,27 +186,8 @@ if user_input:
     headers: Dict = {"accept": "application/json", "Content-Type": "application/json"}
     output: str = None
     new_docs = []
-    if mode == MODE_TEXT2TEXT:
-        api_text2text_ep: str = f"{api}/{API_TEXT2TEXT_PATH[text2text_model][embeddings_model]}"
-        data = {
-            "model": "gpt",
-            "messages": [
-                {
-                    "role": "assistant",
-                    "content": "Hi there! I'm QaBot, an AI assistant. I can help you with things like answering questions, providing information, and helping with tasks. How can I help you?",
-                },
-                {"role": "user", "content": user_input},
-            ],
-            "temperature": 0.2,
-        }
-        resp = req.post(api_text2text_ep, headers=headers, json=data)
-        if resp.status_code != HTTP_OK:
-            output = resp.text
-        else:
-            output = resp.json()["choices"][0]["message"]["content"]
-    elif mode == MODE_RAG:
-        api_rag_ep: str = f"{api}/{API_RAG_PATH[text2text_model][embeddings_model]}"
-        print(f"+++++++++++ api_rag_ep={api_rag_ep} +++++++++++++++++")
+    if not RAG:
+        api_text2text_ep: str = f"{api}/chat-without-rag"
         data = {
             "model": "gpt",
             "messages": [
@@ -166,7 +199,36 @@ if user_input:
             ],
             "temperature": temperature_value,
             "env": {
+                "chat_history_window": chat_history_window_value,
+                "text2text_model": text2text_model,
+                "session_id": st.session_state.session_id,
+            },
+        }
+        resp = req.post(api_text2text_ep, headers=headers, json=data)
+        if resp.status_code != HTTP_OK:
+            output = resp.text
+        else:
+            output = resp.json()["choices"][0]["message"]["content"]
+    else:
+        api_rag_ep: str = f"{api}/question-answering"
+        data = {
+            "model": "gpt",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "Hi there! I'm QaBot, an AI assistant. I can help you with things like answering questions, providing information, and helping with tasks. How can I help you?",
+                },
+                {"role": "user", "content": user_input},
+            ],
+            "temperature": temperature_value,
+            "env": {
+                "chat_history_window": chat_history_window_value,
                 "k": k_value,
+                "embeddings_model": embeddings_model,
+                "text2text_model": text2text_model,
+                "index_name": index_name,
+                "chain": chain,
+                "session_id": st.session_state.session_id,
             },
         }
         resp = req.post(api_rag_ep, headers=headers, json=data)
@@ -182,16 +244,22 @@ if user_input:
             # 从响应数据中提取文档信息
 
             for document in response_data["docs"]:
-                doc = {"page_content": document["page_content"], "s3_key": document["metadata"]["s3_key"]}
+                if chain == "load_qa_chain":
+                    doc = {
+                        "page_content": document["page_content"],
+                        "s3_key": document["metadata"]["s3_key"],
+                        "score": document["score"],
+                    }
+                elif chain in ("RetrievalQA", "RetrievalQAwithMemory"):  # without score
+                    doc = {
+                        "page_content": document["page_content"],
+                        "s3_key": document["metadata"]["s3_key"],
+                    }
                 new_docs.append(doc)
 
-    else:
-        print("error")
-        output = f"unhandled mode value={mode}"
     st.session_state.past.append(user_input)
     st.session_state.generated.append(output)
     st.session_state.docs.append(new_docs)
-
 
 # download the chat history
 download_str: List = []
@@ -210,8 +278,9 @@ with st.expander("Conversation", expanded=True):
                 # st.info(f"S3 Key: {st.session_state['docs'][i][j]['s3_key']}")
                 st.markdown(
                     f"<div style='background-color: Gainsboro; padding: 1px; border-radius: 5px; margin-bottom: 5px;'>"
-                    f"<div style='margin-top: -2px;'><b>S3 Key:</b> {st.session_state['docs'][i][j]['s3_key']}</div>"
-                    f"<hr style='margin-bottom: -2px;'>"
+                    f"<div style='margin-top: 2px; margin-bottom: 1px;'><b>S3 Key:</b> {st.session_state['docs'][i][j]['s3_key']}</div>"
+                    f"<div style='margin-top: 1px; margin-bottom: 1px;'><b>Score:</b> {st.session_state['docs'][i][j]['score'] if chain == 'load_qa_chain' else 'Not Available'}</div>"
+                    f"<hr style='margin-top: 1px; margin-bottom: 2px;'>"
                     f"<b>Page Content ({j+1}):</b> {st.session_state['docs'][i][j]['page_content']}"
                     "</div>",
                     unsafe_allow_html=True,
